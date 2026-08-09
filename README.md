@@ -1,5 +1,7 @@
 # pi-kimi-webbridge-bootstrap
 
+[中文](./README.zh-CN.md)
+
 A thin Pi-side bootstrap proxy that installs and keeps the official Kimi WebBridge daemon and Pi skill aligned without requiring Kimi Code. It is not a browser-control implementation of its own.
 
 The package does not vendor Moonshot AI's proprietary skill or runtime. It downloads release metadata, binaries, and skills directly from `https://cdn.kimi.com/webbridge`.
