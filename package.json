@@ -1,6 +1,6 @@
 {
   "name": "@specode/pi-kimi-webbridge-bootstrap",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Pi-side bootstrap proxy that installs and updates the official Kimi WebBridge runtime and skill.",
   "type": "module",
   "license": "MIT",
