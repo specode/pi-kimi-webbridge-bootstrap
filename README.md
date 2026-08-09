@@ -27,10 +27,16 @@ The periodic check is session-triggered. This package does not install a cron jo
 
 ## Install
 
-From a GitHub repository:
+From npm:
 
 ```bash
-pi install git:github.com/YOUR_NAME/pi-kimi-webbridge-bootstrap
+pi install npm:@specode/pi-kimi-webbridge-bootstrap
+```
+
+From GitHub:
+
+```bash
+pi install git:github.com/specode/pi-kimi-webbridge-bootstrap
 ```
 
 For local development:
@@ -88,3 +94,7 @@ If `PI_CODING_AGENT_DIR` is configured, Pi's resolved agent directory is used in
 npm test
 npm run check
 ```
+
+## License
+
+MIT

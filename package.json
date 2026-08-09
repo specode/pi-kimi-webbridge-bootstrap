@@ -1,14 +1,32 @@
 {
-  "name": "pi-kimi-webbridge-bootstrap",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@specode/pi-kimi-webbridge-bootstrap",
+  "version": "0.1.1",
   "description": "Pi-side bootstrap proxy that installs and updates the official Kimi WebBridge runtime and skill.",
   "type": "module",
+  "license": "MIT",
+  "author": "specode",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/specode/pi-kimi-webbridge-bootstrap.git"
+  },
+  "homepage": "https://github.com/specode/pi-kimi-webbridge-bootstrap#readme",
+  "bugs": {
+    "url": "https://github.com/specode/pi-kimi-webbridge-bootstrap/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "pi-package",
     "pi",
     "kimi-webbridge",
     "browser-automation"
+  ],
+  "files": [
+    "extensions",
+    "src",
+    "README.md",
+    "LICENSE"
   ],
   "pi": {
     "extensions": [
