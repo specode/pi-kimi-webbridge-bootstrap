@@ -18,11 +18,11 @@ The package does not vendor Moonshot AI's proprietary skill or runtime. It downl
 - Keeps the previous skill active until the new archive has passed path, entry-type, expanded-size, and frontmatter/version validation, then atomically switches a pointer to the staged release.
 - Guides the user to install the browser extension when the first bootstrap cannot detect a connection.
 
-The periodic check is session-triggered. This package does not install a cron job or launch agent. When a cached skill exists, the check runs in the background so an unavailable CDN or slow upgrade does not delay Pi resource discovery. If that check changes the skill, Pi reloads its resources after the update completes. If a concurrent first-time bootstrap still owns the shared lock after the initial wait, this session warns immediately and retries in the background for up to five minutes before reloading the newly available skill.
+The periodic check is session-triggered. This package does not install a cron job or launch agent. When a cached skill exists, the check runs in the background so an unavailable CDN or slow upgrade does not delay Pi resource discovery. If that check changes the skill, the extension asks you to run `/reload`; background event contexts cannot reload Pi. `/webbridge-update` also asks you to run `/reload` when it changes the skill, because Pi ignores extension-triggered reloads while a response or compaction is running and gives the extension no way to confirm them. If a concurrent first-time bootstrap still owns the shared lock after the initial wait, this session warns immediately and retries in the background for up to five minutes, then asks you to run `/reload` once the skill is available. With a cached skill, a busy background check also retries for up to five minutes and compares the active skill publication, so reloading during an update does not lose its completion notification. Shutdown cancels retries and suppresses late notifications.
 
 ## Requirements
 
-- Pi with package and `resources_discover` support (tested against Pi `0.84.1`).
+- Pi with package and `resources_discover` support (loader compatibility checked against Pi `1.0.2`).
 - Node.js 20 or newer.
 - macOS or Linux on arm64/x64. Windows metadata is recognized, but skill extraction currently requires a compatible `tar` command and has not been validated by this project.
 - The [Kimi WebBridge browser extension](https://chromewebstore.google.com/detail/kimi-webbridge/fldmhceldgbpfpkbgopacenieobmligc) for actual browser control.
@@ -65,7 +65,7 @@ The first bootstrap displays this link automatically when no extension connectio
 
 - `/webbridge-status` — show daemon, browser extension, skill cache, and last updater error.
 - `/webbridge-setup` — show browser-extension installation guidance or confirm that it is connected.
-- `/webbridge-update` — force a release check and refresh the Pi skill, then reload Pi resources.
+- `/webbridge-update` — force a release check and refresh the Pi skill, then ask you to run `/reload` if the skill changed.
 
 ## Configuration
 
@@ -86,7 +86,9 @@ The active Pi skill is selected by an atomic cache pointer:
 ~/.pi/agent/cache/pi-kimi-webbridge-bootstrap/skills/releases/<version>-<archive-sha256>/
 ```
 
-On macOS and Linux, Pi discovers the stable `skills/current` path, whose link target is replaced atomically after validation. On Windows, where an existing directory junction cannot be atomically replaced, `active.json` atomically selects an immutable release and Pi reloads that release path after an update. Older validated releases are retained as rollback-safe cache entries. A legacy `skills/kimi-webbridge/` directory remains a valid fallback during migration.
+On macOS and Linux, Pi discovers the stable `skills/current` path, whose link target is replaced atomically after validation. On Windows, where an existing directory junction cannot be atomically replaced, `active.json` atomically selects an immutable release and Pi loads that release path on the next `/reload`. Older validated releases are retained as rollback-safe cache entries. A legacy `skills/kimi-webbridge/` directory remains a valid fallback during migration.
+
+The publication commit point is the `current` link replacement on macOS/Linux and the `active.json` replacement on Windows. On macOS/Linux, `active.json` is only a recovery hint. A failure before commit leaves the previous skill active. Bookkeeping or lock-cleanup failures after commit are reported as warnings, not failed updates, so a successfully published skill still triggers the `/reload` prompt.
 
 If `PI_CODING_AGENT_DIR` is configured, Pi's resolved agent directory is used instead.
 

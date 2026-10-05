@@ -455,6 +455,32 @@ test("does not trust a pre-existing release directory with the expected name", a
   );
 });
 
+for (const platform of ["darwin", "win32"]) {
+  test(`skill publication identity detects same-version refreshes on ${platform}`, async (t) => {
+    const root = await mkdtemp(path.join(tmpdir(), "pi-webbridge-publication-test-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const manager = new WebbridgeManager({ agentDir: root, userHomeDir: root, platform });
+    assert.equal(await manager.readSkillPublication(), undefined);
+
+    await mkdir(manager.legacySkillRoot, { recursive: true });
+    await writeFile(path.join(manager.legacySkillRoot, "SKILL.md"), "legacy\n");
+    let previous = await manager.readSkillPublication();
+    assert.ok(previous);
+    // Even identical version/digest publications can have a new release directory.
+    for (const index of [0, 1]) {
+      const candidate = path.join(root, `candidate-${index}`);
+      await mkdir(candidate);
+      await writeFile(path.join(candidate, "SKILL.md"), "fixture\n");
+      await manager.publishSkill(candidate, "v1.2.3", "a".repeat(64));
+      const publication = await manager.readSkillPublication();
+      assert.ok(publication);
+      assert.notEqual(publication, previous);
+      assert.equal(await manager.readSkillPublication(), publication);
+      previous = publication;
+    }
+  });
+}
+
 test("Windows selects immutable skill releases through the atomic pointer", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "pi-webbridge-windows-pointer-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));

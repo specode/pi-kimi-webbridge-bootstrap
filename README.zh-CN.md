@@ -20,11 +20,11 @@
 - 新 skill 过完路径、条目类型、解压大小、frontmatter/版本校验后，再原子切换指针；失败时旧 skill 继续可用
 - 首次引导若检测不到浏览器扩展连接，会提示安装扩展
 
-定时检查是会话触发的，不会装 cron 或 launch agent。已有缓存 skill 时，检查在后台跑，CDN 慢或挂了不会拖住 Pi 的资源发现。skill 变了会在更新完成后让 Pi 重新加载资源。
+定时检查是会话触发的，不会装 cron 或 launch agent。已有缓存 skill 时，检查在后台跑，CDN 慢或挂了不会拖住 Pi 的资源发现。skill 变了会在更新完成后提示你执行 `/reload`，不会从后台事件上下文强行 reload。手动 `/webbridge-update` 在 skill 变化时同样提示执行 `/reload`：模型回复或压缩上下文期间 Pi 会忽略扩展触发的 reload，扩展也无法确认它是否生效。首次安装若遇到其他会话持有更新锁，会在后台重试最多 5 分钟，skill 就绪后提示 `/reload`。已有缓存时，后台检查遇到更新锁也会重试最多 5 分钟，并比较实际 skill 发布目录，避免更新期间 reload 丢失完成通知。会话关闭时取消重试，不再使用旧上下文发送通知。
 
 ## 环境要求
 
-- 支持 package 和 `resources_discover` 的 Pi（测过 `0.84.1`）
+- 支持 package 和 `resources_discover` 的 Pi（已检查 `1.0.2` 的扩展加载兼容性）
 - Node.js 20+
 - macOS 或 Linux，arm64 / x64  
   Windows 元数据能识别，但 skill 解压依赖兼容的 `tar`，本项目未完整验证
@@ -69,7 +69,7 @@ CLI 和 skill 可以自动装；Chrome / Edge 的扩展需要你自己点确认�
 ```text
 /webbridge-status   # daemon、扩展、skill 缓存、上次更新错误
 /webbridge-setup    # 扩展安装引导，或确认已连接
-/webbridge-update   # 强制检查发布并刷新 Pi skill，然后 reload 资源
+/webbridge-update   # 强制检查发布并刷新 Pi skill，skill 变化时提示执行 /reload
 ```
 
 ## 配置
@@ -91,7 +91,9 @@ Pi 侧 active skill 靠原子缓存指针切换：
 ~/.pi/agent/cache/pi-kimi-webbridge-bootstrap/skills/releases/<version>-<archive-sha256>/
 ```
 
-macOS / Linux 上 Pi 发现的是稳定路径 `skills/current`，校验通过后原子替换链接目标。Windows 上目录 junction 不能原子替换，所以用 `active.json` 原子选出不可变 release，更新后 Pi 再加载该路径。旧的已校验 release 会留着，方便回滚。迁移期间，遗留的 `skills/kimi-webbridge/` 目录仍可作为回退。
+macOS / Linux 上 Pi 发现的是稳定路径 `skills/current`，校验通过后原子替换链接目标。Windows 上目录 junction 不能原子替换，所以用 `active.json` 原子选出不可变 release，下次 `/reload` 时 Pi 再加载该路径。旧的已校验 release 会留着，方便回滚。迁移期间，遗留的 `skills/kimi-webbridge/` 目录仍可作为回退。
+
+发布提交点在 macOS / Linux 上是替换 `current` 链接，在 Windows 上是替换 `active.json`；macOS / Linux 上的 `active.json` 只用于恢复。提交前失败会保留旧 skill。提交后状态记录或锁清理失败只报告警告，不再把已发布成功的更新当作失败，因此仍会提示 `/reload`。
 
 若配置了 `PI_CODING_AGENT_DIR`，会用 Pi 解析后的 agent 目录。
 

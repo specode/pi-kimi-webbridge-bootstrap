@@ -7,7 +7,7 @@ import {
   runInitialUpdate,
   runManualUpdate,
   startBackgroundUpdate,
-  startInitialBusyRecovery,
+  startBusyRecovery,
 } from "../src/lifecycle.js";
 
 test("cached startup launches the updater without awaiting it", async () => {
@@ -65,7 +65,7 @@ test("initial setup reports a busy updater as a warning", async () => {
   assert.deepEqual(notifications, [["another session is updating", "warning"]]);
 });
 
-test("a successful background skill update requests a reload callback", async () => {
+test("a successful background skill update reports its result", async () => {
   let reloaded = false;
   let finished;
   const completion = new Promise((resolve) => {
@@ -90,7 +90,7 @@ test("a busy initial setup retries in the background until it can continue", asy
   const completed = new Promise((resolve) => {
     finish = resolve;
   });
-  const cancel = startInitialBusyRecovery(
+  const cancel = startBusyRecovery(
     async (force) => {
       assert.equal(force, false);
       calls.push(force);
@@ -110,7 +110,30 @@ test("a busy initial setup retries in the background until it can continue", asy
   assert.equal(calls.length, 2);
 });
 
-test("a deferred background reload is consumed when a manual update fails", async () => {
+test("busy recovery stops at its deadline without a final out-of-budget update", async () => {
+  let now = 0;
+  let calls = 0;
+  let notified = false;
+  startBusyRecovery(
+    async () => {
+      calls += 1;
+      return { kind: "busy", skillUpdated: false };
+    },
+    () => { notified = true; },
+    {
+      timeoutMs: 3,
+      retryDelayMs: 1,
+      now: () => now,
+      delay: async (ms) => { now += ms; },
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(now, 3);
+  assert.equal(calls, 2);
+  assert.equal(notified, false);
+});
+
+test("a deferred background notification is delivered when a manual update fails", async () => {
   const coordinator = createSkillReloadCoordinator();
   let reloads = 0;
   coordinator.beginManual();
@@ -128,41 +151,30 @@ test("a deferred background reload is consumed when a manual update fails", asyn
   assert.equal(reloads, 1);
 });
 
-test("manual update clears UI state before reload invalidates the old context", async () => {
+test("manual update asks for /reload instead of reloading itself", async () => {
   const statuses = [];
   const notifications = [];
-  let active = true;
   const ctx = {
     ui: {
-      setStatus(key, value) {
-        assert.equal(active, true);
-        statuses.push([key, value]);
-      },
-      notify(message, level) {
-        assert.equal(active, true);
-        notifications.push([message, level]);
-      },
+      setStatus: (key, value) => statuses.push([key, value]),
+      notify: (message, level) => notifications.push([message, level]),
     },
-    async reload() {
-      assert.equal(statuses.at(-1)?.[1], undefined);
-      active = false;
-    },
+    reload: async () => { throw new Error("Pi cannot confirm extension reloads"); },
   };
 
-  const reloaded = await runManualUpdate({
+  const reloadPrompted = await runManualUpdate({
     ctx,
     update: async (force) => {
       assert.equal(force, true);
       return { kind: "updated", skillUpdated: true };
     },
-    formatUpdate: () => "updated",
+    formatUpdate: () => "updated; run /reload",
   });
 
   assert.deepEqual(statuses, [
     ["pi-kimi-webbridge-bootstrap", "Updating Kimi WebBridge…"],
     ["pi-kimi-webbridge-bootstrap", undefined],
   ]);
-  assert.deepEqual(notifications, [["updated", "info"]]);
-  assert.equal(active, false);
-  assert.equal(reloaded, true);
+  assert.deepEqual(notifications, [["updated; run /reload", "info"]]);
+  assert.equal(reloadPrompted, true);
 });

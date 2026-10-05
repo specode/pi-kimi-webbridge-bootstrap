@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rename,
   rmdir,
   rm,
@@ -18,6 +19,7 @@ import {
 import { homedir } from "node:os";
 import path from "node:path";
 import { createGunzip } from "node:zlib";
+import { parse as parseYaml } from "yaml";
 
 import { runChecked, runCommand } from "./process.js";
 
@@ -255,91 +257,41 @@ export async function validateSkillArchive(
   return entries;
 }
 
-function unquoteYamlScalar(value) {
-  const trimmed = value.trim();
-  if (
-    trimmed.length >= 2 &&
-    ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-      (trimmed.startsWith("'") && trimmed.endsWith("'")))
-  ) {
-    return trimmed.slice(1, -1);
-  }
-  return trimmed;
-}
-
 export function validateSkillManifest(source, expectedVersion) {
-  const lines = source.replace(/^\uFEFF/, "").split(/\r?\n/);
+  // Pi checks for "---" before stripping a BOM, so a BOM hides the frontmatter
+  // and Pi silently drops the skill. Reject it instead of publishing it.
+  if (source.startsWith("\uFEFF")) throw new Error("WebBridge SKILL.md starts with a byte order mark");
+  // Match Pi's boundaries: it normalizes every line ending and ends the
+  // frontmatter at the first later line that merely starts with "---".
+  const lines = source.replace(/\r\n?/g, "\n").split("\n");
   if (lines[0] !== "---") throw new Error("WebBridge SKILL.md has no YAML frontmatter");
-  const closingIndex = lines.findIndex((line, index) => index > 0 && line === "---");
+  const closingIndex = lines.findIndex((line, index) => index > 0 && line.startsWith("---"));
   if (closingIndex === -1) throw new Error("WebBridge SKILL.md has unterminated YAML frontmatter");
-  const frontmatter = lines.slice(1, closingIndex);
-
-  const topLevelValues = (key) =>
-    frontmatter.flatMap((line, index) => {
-      const match = new RegExp(`^${key}:\\s*(.*)$`).exec(line);
-      return match === null ? [] : [{ index, value: match[1] }];
-    });
-  const names = topLevelValues("name");
-  const descriptions = topLevelValues("description");
-  const metadataBlocks = topLevelValues("metadata");
-  if (names.length !== 1 || unquoteYamlScalar(names[0].value) !== "kimi-webbridge") {
+  if (lines[closingIndex] !== "---") throw new Error("WebBridge SKILL.md has an ambiguous frontmatter delimiter");
+  let frontmatter;
+  try {
+    // Use the same YAML semantics as Pi, including duplicate-key rejection.
+    frontmatter = parseYaml(lines.slice(1, closingIndex).join("\n"));
+  } catch (error) {
+    throw new Error(`WebBridge SKILL.md has invalid YAML frontmatter: ${error.message}`, { cause: error });
+  }
+  // Unknown keys are allowed: Pi ignores them, and upstream may add optional
+  // Agent Skills fields without making the skill unusable.
+  if (frontmatter === null || typeof frontmatter !== "object" || Array.isArray(frontmatter)) {
+    throw new Error("WebBridge SKILL.md has invalid frontmatter");
+  }
+  if (frontmatter.name !== "kimi-webbridge") {
     throw new Error("WebBridge SKILL.md has an invalid name");
   }
-  if (descriptions.length !== 1) throw new Error("WebBridge SKILL.md has an invalid description");
-  const descriptionValue = descriptions[0].value.trim();
-  let section;
-  for (const line of frontmatter) {
-    if (line.trim().length === 0 || /^\s*#/.test(line)) continue;
-    if (!/^\s/.test(line)) {
-      const key = /^([a-z][a-z0-9-]*):/.exec(line)?.[1];
-      if (!new Set(["name", "description", "metadata"]).has(key)) {
-        throw new Error("WebBridge SKILL.md has unsupported or invalid frontmatter");
-      }
-      section = key;
-      continue;
-    }
-    if (/^\t|^ +\t/.test(line)) {
-      throw new Error("WebBridge SKILL.md has invalid YAML indentation");
-    }
-    if (section === "description" && /^[|>][+-]?$/.test(descriptionValue)) continue;
-    if (section === "metadata" && /^\s+version:\s*\S/.test(line)) continue;
-    throw new Error("WebBridge SKILL.md has unsupported or invalid frontmatter");
+  if (typeof frontmatter.description !== "string" || frontmatter.description.trim().length === 0) {
+    throw new Error("WebBridge SKILL.md has an invalid description");
   }
-  if (/^[|>][+-]?$/.test(descriptionValue)) {
-    const nextTopLevel = frontmatter.findIndex(
-      (line, index) => index > descriptions[0].index && line.length > 0 && !/^\s/.test(line),
-    );
-    const descriptionEnd = nextTopLevel === -1 ? frontmatter.length : nextTopLevel;
-    if (!frontmatter.slice(descriptions[0].index + 1, descriptionEnd).some((line) => /^\s+\S/.test(line))) {
-      throw new Error("WebBridge SKILL.md has an empty description");
-    }
-  } else {
-    const description = unquoteYamlScalar(descriptionValue).trim();
-    if (
-      description.length === 0 ||
-      /^[\[\]{}&,*!|>@`%]/.test(description) ||
-      description.includes(": ") ||
-      /\s#/.test(description)
-    ) {
-      throw new Error("WebBridge SKILL.md has an invalid description");
-    }
-  }
-
-  if (metadataBlocks.length !== 1 || metadataBlocks[0].value.trim().length !== 0) {
+  const metadata = frontmatter.metadata;
+  if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) {
     throw new Error("WebBridge SKILL.md has invalid metadata");
   }
-  const nextTopLevel = frontmatter.findIndex(
-    (line, index) => index > metadataBlocks[0].index && line.length > 0 && !/^\s/.test(line),
-  );
-  const metadataEnd = nextTopLevel === -1 ? frontmatter.length : nextTopLevel;
-  const versions = frontmatter
-    .slice(metadataBlocks[0].index + 1, metadataEnd)
-    .flatMap((line) => {
-      const match = /^\s+version:\s*(.*?)\s*$/.exec(line);
-      return match === null ? [] : [unquoteYamlScalar(match[1])];
-    });
-  const actual = parseReleaseVersion(versions[0])?.normalized;
-  if (versions.length !== 1 || actual === undefined) {
+  const actual = parseReleaseVersion(metadata.version)?.normalized;
+  if (actual === undefined) {
     throw new Error("WebBridge SKILL.md has an invalid metadata version");
   }
   if (expectedVersion !== undefined && actual !== parseReleaseVersion(expectedVersion)?.normalized) {
@@ -546,6 +498,13 @@ export class WebbridgeManager {
     return undefined;
   }
 
+  async readSkillPublication() {
+    const skillRoot = await this.resolveSkillRoot();
+    if (skillRoot === undefined) return undefined;
+    // Resolve the stable symlink to its immutable release, including same-version refreshes.
+    return realpath(skillRoot).catch(() => undefined);
+  }
+
   async readInstalledSkillVersion() {
     const skillRoot = await this.resolveSkillRoot();
     if (skillRoot === undefined) return undefined;
@@ -581,6 +540,7 @@ export class WebbridgeManager {
     if (!lock) return { kind: "busy", cliUpdated: false, skillUpdated: false };
 
     let state = await readJson(this.statePath);
+    let committedResult;
     try {
       const cliInstalledBefore = await exists(this.cliPath);
       let daemon;
@@ -653,7 +613,17 @@ export class WebbridgeManager {
         throw new Error("Kimi WebBridge daemon returned an invalid version");
       }
       const skillUpdated = force || !hasCachedSkill || cachedSkillVersion !== targetVersion;
-      if (skillUpdated) await this.installSkill(targetVersion);
+      const warnings = skillUpdated ? (await this.installSkill(targetVersion)) ?? [] : [];
+      const result = {
+        kind: cliUpdated || skillUpdated ? "updated" : "ready",
+        cliUpdated,
+        skillUpdated,
+        version: targetVersion,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
+      // Once the active pointer has changed, bookkeeping/cleanup errors must
+      // not turn a committed publication into a failed update and lose reload.
+      if (skillUpdated) committedResult = result;
 
       state = {
         ...state,
@@ -664,12 +634,7 @@ export class WebbridgeManager {
       delete state.lastError;
       await this.writeState(state);
 
-      return {
-        kind: cliUpdated || skillUpdated ? "updated" : "ready",
-        cliUpdated,
-        skillUpdated,
-        version: targetVersion,
-      };
+      return result;
     } catch (error) {
       state = {
         ...state,
@@ -677,9 +642,20 @@ export class WebbridgeManager {
         lastError: error instanceof Error ? error.message : String(error),
       };
       await this.writeState(state).catch(() => undefined);
+      if (committedResult) {
+        (committedResult.warnings ??= []).push(`Skill is active, but update bookkeeping failed: ${state.lastError}`);
+        return committedResult;
+      }
       throw error;
     } finally {
-      await lock.release();
+      try {
+        await lock.release();
+      } catch (error) {
+        if (!committedResult) throw error;
+        (committedResult.warnings ??= []).push(
+          `Skill is active, but releasing the update lock failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
@@ -789,7 +765,7 @@ export class WebbridgeManager {
       const candidate = path.join(extractRoot, "kimi-webbridge");
       const skill = await readFile(path.join(candidate, "SKILL.md"), "utf8");
       validateSkillManifest(skill, version);
-      await this.publishSkill(candidate, version, archiveDigest);
+      return await this.publishSkill(candidate, version, archiveDigest);
     } finally {
       await rm(workRoot, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -823,10 +799,18 @@ export class WebbridgeManager {
       // it to the immutable publication after a reload.
       await writeAtomic(this.activeSkillPath, pointer);
       this.skillRoot = target;
-      return;
+      return [];
     }
+    // On POSIX, current is the authoritative selector and its atomic rename is
+    // the commit point. active.json is only a recovery hint; writing it before
+    // activation could expose an uncommitted release to concurrent readers.
     await this.activateSkillRoot(target);
-    await writeAtomic(this.activeSkillPath, pointer);
+    try {
+      await writeAtomic(this.activeSkillPath, pointer);
+      return [];
+    } catch (error) {
+      return [`Skill is active, but writing active.json failed: ${error instanceof Error ? error.message : String(error)}`];
+    }
   }
 
   async activateSkillRoot(target) {
@@ -838,9 +822,7 @@ export class WebbridgeManager {
       await rename(temporary, this.currentSkillRoot);
       this.skillRoot = this.currentSkillRoot;
     } finally {
-      await unlink(temporary).catch((error) => {
-        if (error.code !== "ENOENT") throw error;
-      });
+      await unlink(temporary).catch(() => undefined);
     }
   }
 

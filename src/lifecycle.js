@@ -40,7 +40,7 @@ export function startBackgroundUpdate(update, onResult) {
     .catch(() => undefined);
 }
 
-export function startInitialBusyRecovery(update, onReady, options = {}) {
+export function startBusyRecovery(update, onReady, options = {}) {
   const timeoutMs = options.timeoutMs ?? 5 * 60 * 1_000;
   const retryDelayMs = options.retryDelayMs ?? 1_000;
   const now = options.now ?? Date.now;
@@ -51,7 +51,7 @@ export function startInitialBusyRecovery(update, onReady, options = {}) {
   void (async () => {
     while (!cancelled && now() < deadline) {
       await delay(retryDelayMs);
-      if (cancelled) return;
+      if (cancelled || now() >= deadline) return;
       const result = await update(false);
       if (result.kind === "busy") continue;
       if (!cancelled) await onReady(result);
@@ -65,32 +65,50 @@ export function startInitialBusyRecovery(update, onReady, options = {}) {
 }
 
 export function createSkillReloadCoordinator() {
+  let active = true;
   let manualDepth = 0;
   let pendingSkillReload = false;
+  let notified = false;
 
   return {
-    beginManual() {
-      manualDepth += 1;
+    get active() {
+      return active;
     },
-    async handleBackgroundResult(result, reload) {
-      if (result.skillUpdated !== true) return;
+    dispose() {
+      active = false;
+      pendingSkillReload = false;
+    },
+    beginManual() {
+      if (active) manualDepth += 1;
+    },
+    async handleBackgroundResult(result, notify) {
+      if (!active || result.skillUpdated !== true || notified) return;
       if (manualDepth > 0) {
         pendingSkillReload = true;
         return;
       }
-      await reload();
+      // Event contexts cannot reload. Notify once; the user owns /reload.
+      notified = true;
+      await notify();
     },
-    async finishManual(reloaded, reload) {
+    async finishManual(reloadPrompted, notify) {
+      if (!active) return;
       manualDepth = Math.max(0, manualDepth - 1);
+      // A manual update that changed the skill has already asked for /reload.
+      if (reloadPrompted) notified = true;
       if (manualDepth > 0 || !pendingSkillReload) return;
       pendingSkillReload = false;
-      if (!reloaded) await reload();
+      if (!notified) {
+        notified = true;
+        await notify();
+      }
     },
   };
 }
 
-export async function runInitialUpdate({ ctx, update, formatUpdate }) {
+export async function runInitialUpdate({ ctx, update, formatUpdate, isActive = () => true }) {
   const result = await update(false);
+  if (!isActive()) return result;
   if (result.kind === "busy") {
     ctx.ui.notify(formatUpdate(result), "warning");
     return result;
@@ -101,22 +119,19 @@ export async function runInitialUpdate({ ctx, update, formatUpdate }) {
 
 export async function runManualUpdate({ ctx, update, formatUpdate }) {
   ctx.ui.setStatus("pi-kimi-webbridge-bootstrap", "Updating Kimi WebBridge…");
-  let shouldReload = false;
   try {
     const result = await update(true);
     ctx.ui.notify(formatUpdate(result), result.kind === "busy" ? "warning" : "info");
-    shouldReload = result.skillUpdated === true;
+    // Pi cannot confirm an extension-triggered reload (it ignores reloads while
+    // streaming or compacting), so formatUpdate asks the user to run /reload.
+    return result.skillUpdated === true;
   } catch (error) {
     ctx.ui.notify(
       `Kimi WebBridge update failed: ${error instanceof Error ? error.message : String(error)}`,
       "error",
     );
+    return false;
   } finally {
     ctx.ui.setStatus("pi-kimi-webbridge-bootstrap", undefined);
   }
-  if (shouldReload) {
-    await ctx.reload();
-    return true;
-  }
-  return false;
 }

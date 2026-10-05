@@ -8,7 +8,7 @@ import {
   runInitialUpdate,
   runManualUpdate,
   startBackgroundUpdate,
-  startInitialBusyRecovery,
+  startBusyRecovery,
 } from "../src/lifecycle.js";
 import { WebbridgeManager } from "../src/manager.js";
 
@@ -34,57 +34,104 @@ function formatStatus(status) {
   return `WebBridge daemon: ${daemon}\nBrowser extension: ${extension}\nPi skill: ${skill}\nCLI: ${status.cliPath}\nSkill: ${status.skillRoot}${error}${extensionGuide}`;
 }
 
-function formatUpdate(result) {
+function formatWarnings(warnings = []) {
+  return warnings.map((warning) => `\nWarning: ${warning}`).join("");
+}
+
+function formatUpdate(result, { reloadHint = false } = {}) {
   if (result.kind === "busy") return "Another Pi session is already updating Kimi WebBridge.";
   if (result.kind === "ready") return `Kimi WebBridge is current${result.version ? ` (${result.version})` : ""}.`;
   const parts = [result.cliUpdated ? "CLI" : undefined, result.skillUpdated ? "skill" : undefined].filter(Boolean);
-  return `Updated Kimi WebBridge ${parts.join(" and ")}${result.version ? ` to ${result.version}` : ""}.`;
+  const hint = reloadHint && result.skillUpdated ? " Run /reload to load the updated skill." : "";
+  return `Updated Kimi WebBridge ${parts.join(" and ")}${result.version ? ` to ${result.version}` : ""}.${hint}${formatWarnings(result.warnings)}`;
 }
+
+const formatManualUpdate = (result) => formatUpdate(result, { reloadHint: true });
 
 export default function webbridgeBootstrap(pi) {
   const manager = new WebbridgeManager({
     agentDir: getAgentDir(),
     userHomeDir: homedir(),
   });
+  registerWebbridgeBootstrap(pi, manager);
+}
+
+export function registerWebbridgeBootstrap(pi, manager) {
   const update = createUpdateRunner((force) => manager.ensure({ force }));
   const reloadCoordinator = createSkillReloadCoordinator();
-  let cancelInitialRecovery;
+  let cancelRecovery;
+  const notifySkillUpdate = (ctx, warnings = []) => {
+    if (!reloadCoordinator.active) return;
+    const message = `Kimi WebBridge skill updated. Run /reload to load the updated skill.${formatWarnings(warnings)}`;
+    // Without a UI, notify is a no-op; /reload is unavailable there anyway.
+    ctx.ui.notify(message, warnings.length > 0 ? "warning" : "info");
+  };
+
+  pi.on("session_shutdown", () => {
+    reloadCoordinator.dispose();
+    cancelRecovery?.();
+    cancelRecovery = undefined;
+  });
 
   pi.on("session_start", async (_event, ctx) => {
     if (!manager.autoUpdateEnabled()) return;
     const hasSkill = await manager.hasSkill();
+    if (!reloadCoordinator.active) return;
     if (hasSkill) {
-      cancelInitialRecovery?.();
-      cancelInitialRecovery = undefined;
+      cancelRecovery?.();
+      cancelRecovery = undefined;
+      const initialPublication = await manager.readSkillPublication();
+      if (!reloadCoordinator.active) return;
+      const handleReady = async (result) => {
+        if (!reloadCoordinator.active) return;
+        const publication = await manager.readSkillPublication();
+        // Another runtime may have published the skill while we were busy.
+        // Its result is lost on reload; our own check can legitimately be "ready".
+        const skillUpdated =
+          result.skillUpdated === true ||
+          (publication !== undefined && publication !== initialPublication);
+        await reloadCoordinator.handleBackgroundResult(
+          { ...result, skillUpdated },
+          () => notifySkillUpdate(ctx, result.warnings),
+        );
+      };
       // Pi awaits session_start handlers before discovering resources. Keep an
       // existing skill immediately usable and let the guarded updater finish in
       // the background. Its failure is persisted in state.json for /status.
       startBackgroundUpdate(update, async (result) => {
-        await reloadCoordinator.handleBackgroundResult(result, () => ctx.reload());
+        if (!reloadCoordinator.active) return;
+        if (result.kind === "busy") {
+          cancelRecovery = startBusyRecovery(update, handleReady);
+          return;
+        }
+        await handleReady(result);
       });
       return;
     }
 
     try {
-      const result = await runInitialUpdate({ ctx, update, formatUpdate });
+      const result = await runInitialUpdate({ ctx, update, formatUpdate, isActive: () => reloadCoordinator.active });
+      if (!reloadCoordinator.active) return;
       if (result.kind === "busy") {
-        cancelInitialRecovery?.();
-        cancelInitialRecovery = startInitialBusyRecovery(update, async (retryResult) => {
-          if (!(await manager.hasSkill())) return;
-          cancelInitialRecovery?.();
-          cancelInitialRecovery = undefined;
+        cancelRecovery?.();
+        cancelRecovery = startBusyRecovery(update, async (retryResult) => {
+          if (!reloadCoordinator.active || !(await manager.hasSkill()) || !reloadCoordinator.active) return;
+          cancelRecovery?.();
+          cancelRecovery = undefined;
           await reloadCoordinator.handleBackgroundResult(
             { ...retryResult, skillUpdated: true },
-            () => ctx.reload(),
+            () => notifySkillUpdate(ctx, retryResult.warnings),
           );
         });
         return;
       }
       const status = await manager.inspect();
+      if (!reloadCoordinator.active) return;
       if (status.daemon?.extension_connected !== true) {
         ctx.ui.notify(formatBrowserExtensionGuide(), "warning");
       }
     } catch (error) {
+      if (!reloadCoordinator.active) return;
       ctx.ui.notify(
         `Kimi WebBridge automatic setup failed: ${error instanceof Error ? error.message : String(error)}`,
         "error",
@@ -120,15 +167,17 @@ export default function webbridgeBootstrap(pi) {
     description: "Check and install the latest compatible Kimi WebBridge CLI and Pi skill",
     handler: async (_args, ctx) => {
       reloadCoordinator.beginManual();
-      let reloaded = false;
+      let reloadPrompted = false;
       try {
-        reloaded = await runManualUpdate({ ctx, update, formatUpdate });
+        reloadPrompted = await runManualUpdate({ ctx, update, formatUpdate: formatManualUpdate });
       } finally {
-        if (reloaded) {
-          cancelInitialRecovery?.();
-          cancelInitialRecovery = undefined;
+        if (reloadPrompted) {
+          cancelRecovery?.();
+          cancelRecovery = undefined;
         }
-        await reloadCoordinator.finishManual(reloaded, () => ctx.reload());
+        // A concurrent background check may have published a skill even when
+        // this manual update failed; ask for /reload once in that case.
+        await reloadCoordinator.finishManual(reloadPrompted, () => notifySkillUpdate(ctx));
       }
     },
   });
